@@ -2,7 +2,7 @@
 
 与 [ZstdNet Velocity 插件](https://github.com/sitbat/zstdnet-velocity) 配套的 Fabric 客户端。客户端与 Velocity 之间先进行 Zstd 压缩，再使用原版 AES 加密；继续使用正版认证和代理的 modern forwarding。
 
-当前分支构建 Minecraft **26.3** 客户端 **2.2.0**。
+当前分支构建 Minecraft **26.3** 客户端 **2.2.1**。
 
 | 分支 | Minecraft | 客户端版本 | Java |
 | --- | --- | --- | --- |

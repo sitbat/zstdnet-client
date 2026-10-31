@@ -2,7 +2,7 @@ plugins {
     id 'net.fabricmc.fabric-loom' version '1.17.21'
 }
 
-version = '2.2.0'
+version = '2.2.1'
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(25)
 tasks.withType(JavaCompile).configureEach { options.release = 25 }
@@ -13,8 +13,8 @@ base {
 
 dependencies {
     minecraft 'com.mojang:minecraft:26.3'
-    implementation 'net.fabricmc:fabric-loader:0.20.1'
-    implementation 'net.fabricmc.fabric-api:fabric-api:0.165.0+26.3'
+    implementation "net.fabricmc:fabric-loader:${providers.gradleProperty('fabric_loader_version').getOrElse('0.20.1')}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${providers.gradleProperty('fabric_api_version').getOrElse('0.165.0+26.3')}"
 
     implementation project(':common')
     include project(':common')
@@ -41,6 +41,27 @@ sourceSets {
         compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
         runtimeClasspath += sourceSets.main.runtimeClasspath
     }
+    viaCompatibility {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+configurations {
+    viaCompatibilityImplementation.extendsFrom testImplementation
+    viaCompatibilityRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+dependencies {
+    // Optional test fixture extracted from the checksum-pinned official ViaFabricPlus release.
+    // Never included in the client jar or the normal build/test runtime.
+    viaCompatibilityImplementation files(rootProject.file('runtime/viaversion-common-vfp-5.1.1.jar'))
+}
+
+tasks.register('testViaCompatibility', Test) {
+    dependsOn tasks.named('viaCompatibilityClasses')
+    testClassesDirs = sourceSets.viaCompatibility.output.classesDirs
+    classpath = sourceSets.viaCompatibility.runtimeClasspath
 }
 
 tasks.register('smokeJar', Jar) {

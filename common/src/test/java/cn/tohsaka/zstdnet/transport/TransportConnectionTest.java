@@ -315,6 +315,121 @@ class TransportConnectionTest {
     }
 
     @Test
+    void protocolTranslationRunsBeforeZstdForNormalRawAndGeneratedWrites() throws Exception {
+        assertProtocolTranslationOrder(true);
+    }
+
+    @Test
+    void protocolTranslationWithoutNativeCompressionStillRunsBeforeZstd() throws Exception {
+        assertProtocolTranslationOrder(false);
+    }
+
+    private static void assertProtocolTranslationOrder(boolean nativeCompression) throws Exception {
+        Peer client = nativeCompression ? separatedClientPeer() : barePeer(true);
+        Peer proxy = nativeCompression ? peer(true) : barePeer(true);
+        TransportConnection.Layout clientLayout = nativeCompression ? CLIENT_LAYOUT : LAYOUT;
+        OutboundProtocolTranslator clientOutbound = new OutboundProtocolTranslator();
+        OutboundProtocolTranslator proxyOutbound = new OutboundProtocolTranslator();
+        InboundProtocolTranslator clientInbound = new InboundProtocolTranslator();
+        InboundProtocolTranslator proxyInbound = new InboundProtocolTranslator();
+        client.channel.pipeline().addBefore(clientLayout.packetEncoder(), "via-encoder", clientOutbound);
+        proxy.channel.pipeline().addBefore(LAYOUT.packetEncoder(), "via-encoder", proxyOutbound);
+        client.channel.pipeline().addBefore(nativeCompression ? "decoder" : "minecraft-decoder",
+            "via-decoder", clientInbound);
+        proxy.channel.pipeline().addBefore("minecraft-decoder", "via-decoder", proxyInbound);
+        try {
+            // Keep the same cipher instances across the vanilla-to-Zstd boundary in both directions.
+            byte[] vanillaUp = packet(281, 130);
+            byte[] vanillaDown = packet(291, 131);
+            client.channel.writeAndFlush(Unpooled.wrappedBuffer(vanillaUp));
+            proxy.channel.writeAndFlush(Unpooled.wrappedBuffer(vanillaDown));
+            transfer(client.channel, proxy.channel, 1);
+            transfer(proxy.channel, client.channel, 2);
+            assertPacket(proxy.channel, vanillaUp);
+            assertPacket(client.channel, vanillaDown);
+            int nativeCalls = nativeCompression ? 1 : 0;
+            assertEquals(nativeCalls, client.nativeResource.encodes);
+            assertEquals(nativeCalls, proxy.nativeResource.encodes);
+            assertEquals(nativeCalls, client.nativeResource.decodes);
+            assertEquals(nativeCalls, proxy.nativeResource.decodes);
+
+            prepare(client, clientLayout);
+            prepare(proxy);
+            TransportConnection.enableOutbound(client.channel, 3, clientLayout, client.stats);
+            TransportConnection.enableOutbound(proxy.channel, 3, LAYOUT, proxy.stats);
+
+            byte[] normalUp = packet(411, 132);
+            byte[] rawUp = packet(421, 133);
+            byte[] generatedUp = packet(431, 134);
+            byte[] normalDown = packet(441, 135);
+            byte[] rawDown = packet(451, 136);
+            byte[] generatedDown = packet(461, 137);
+            clientOutbound.generatedPacket = generatedUp;
+            proxyOutbound.generatedPacket = generatedDown;
+            var normalUpWrite = client.channel.writeAndFlush(Unpooled.wrappedBuffer(normalUp));
+            var normalDownWrite = proxy.channel.writeAndFlush(Unpooled.wrappedBuffer(normalDown));
+            // Via also writes raw encoded packets from the Minecraft encoder context. Such writes
+            // skip that encoder itself, but must still pass translation and the Zstd boundary.
+            var rawUpWrite = client.channel.pipeline().context(clientLayout.packetEncoder())
+                .writeAndFlush(Unpooled.wrappedBuffer(rawUp));
+            var rawDownWrite = proxy.channel.pipeline().context(LAYOUT.packetEncoder())
+                .writeAndFlush(Unpooled.wrappedBuffer(rawDown));
+            flush(client.channel);
+            flush(proxy.channel);
+            transfer(client.channel, proxy.channel, 3);
+            transfer(proxy.channel, client.channel, 5);
+            assertPacket(proxy.channel, normalUp);
+            assertPacket(proxy.channel, generatedUp);
+            assertPacket(proxy.channel, rawUp);
+            assertPacket(client.channel, normalDown);
+            assertPacket(client.channel, generatedDown);
+            assertPacket(client.channel, rawDown);
+            assertTrue(normalUpWrite.isSuccess());
+            assertTrue(normalDownWrite.isSuccess());
+            assertTrue(rawUpWrite.isSuccess());
+            assertTrue(rawDownWrite.isSuccess());
+            assertNotNull(clientOutbound.generatedWrite);
+            assertNotNull(proxyOutbound.generatedWrite);
+            assertTrue(clientOutbound.generatedWrite.isSuccess());
+            assertTrue(proxyOutbound.generatedWrite.isSuccess());
+
+            // A later batch must preserve both protocol translation and continuous AES/Zstd state.
+            byte[] laterUp = packet(70 * 1024, 138);
+            byte[] laterDown = packet(70 * 1024, 139);
+            client.channel.writeAndFlush(Unpooled.wrappedBuffer(laterUp));
+            proxy.channel.pipeline().context(LAYOUT.packetEncoder())
+                .writeAndFlush(Unpooled.wrappedBuffer(laterDown));
+            flush(client.channel);
+            flush(proxy.channel);
+            transfer(client.channel, proxy.channel, 7);
+            transfer(proxy.channel, client.channel, 11);
+            assertPacket(proxy.channel, laterUp);
+            assertPacket(client.channel, laterDown);
+            assertNull(client.channel.readInbound());
+            assertNull(proxy.channel.readInbound());
+            assertEquals(4, clientOutbound.writes, "generated packets must not be translated a second time");
+            assertEquals(4, proxyOutbound.writes, "raw encoder-context writes must still be translated");
+            assertEquals(5, clientInbound.reads, "each vanilla or Zstd packet must reach inbound translation once");
+            assertEquals(5, proxyInbound.reads, "each generated packet must reach inbound translation once");
+            assertEquals(nativeCalls, client.nativeResource.encodes, "active Zstd must not invoke native zlib");
+            assertEquals(nativeCalls, proxy.nativeResource.encodes);
+            assertEquals(nativeCalls, client.nativeResource.decodes);
+            assertEquals(nativeCalls, proxy.nativeResource.decodes);
+            assertEquals(0, client.nativeResource.closes);
+            assertEquals(0, proxy.nativeResource.closes);
+            assertEquals(client.stats.txRaw(), proxy.stats.rxRaw());
+            assertEquals(client.stats.txWire(), proxy.stats.rxWire());
+            assertEquals(proxy.stats.txRaw(), client.stats.rxRaw());
+            assertEquals(proxy.stats.txWire(), client.stats.rxWire());
+            assertTrue(client.stats.txRaw() > laterUp.length);
+            assertTrue(proxy.stats.txRaw() > laterDown.length);
+        } finally {
+            client.channel.finishAndReleaseAll();
+            proxy.channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
     void anOversizedAdvertisedZstdWindowIsRejectedBeforeNativeHistoryAllocation() throws Exception {
         Peer sender = peer(false);
         Peer receiver = peer(false);
@@ -562,6 +677,51 @@ class TransportConnectionTest {
         int encodes;
         int decodes;
         int closes;
+    }
+
+    /** Adds a target-protocol envelope, representing an ID/field rewrite performed by Via. */
+    private static final class OutboundProtocolTranslator extends ChannelOutboundHandlerAdapter {
+        private int writes;
+        private byte[] generatedPacket;
+        private ChannelPromise generatedWrite;
+
+        @Override public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
+            if (!(message instanceof ByteBuf input)) {
+                context.write(message, promise);
+                return;
+            }
+            writes++;
+            try {
+                context.write(translated(context, input), promise);
+                if (generatedPacket != null) {
+                    // A translator's own target-protocol packet starts at its context, bypassing
+                    // translation on purpose while still needing framing, Zstd, and encryption.
+                    ByteBuf generated = Unpooled.wrappedBuffer(generatedPacket);
+                    generatedPacket = null;
+                    generatedWrite = context.newPromise();
+                    try { context.write(translated(context, generated), generatedWrite); }
+                    finally { generated.release(); }
+                }
+            } finally { input.release(); }
+        }
+
+        private static ByteBuf translated(ChannelHandlerContext context, ByteBuf input) {
+            return context.alloc().buffer(input.readableBytes() + 2)
+                .writeByte(0x63).writeByte(0x26)
+                .writeBytes(input, input.readerIndex(), input.readableBytes());
+        }
+    }
+
+    private static final class InboundProtocolTranslator extends MessageToMessageDecoder<ByteBuf> {
+        private int reads;
+
+        @Override protected void decode(ChannelHandlerContext context, ByteBuf input, List<Object> output) {
+            reads++;
+            assertTrue(input.readableBytes() >= 2, "target-protocol envelope was lost");
+            assertEquals(0x63, input.readUnsignedByte(), "outbound translation was skipped before compression");
+            assertEquals(0x26, input.readUnsignedByte(), "inbound translation must not run before decompression");
+            output.add(input.readRetainedSlice(input.readableBytes()));
+        }
     }
 
     private static final class VarIntFrameDecoder extends ByteToMessageDecoder {

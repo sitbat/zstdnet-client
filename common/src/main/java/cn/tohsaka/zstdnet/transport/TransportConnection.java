@@ -98,7 +98,12 @@ public final class TransportConnection {
         }
         ChannelPipeline pipeline = channel.pipeline();
         if (outboundTarget(pipeline, layout) == null) throw new IllegalStateException("missing wire encoder");
-        pipeline.addBefore(layout.packetEncoder(), BYPASS, new NativeCompressionBypass(layout));
+        // Raw-packet transformers (for example ViaFabricPlus) run between the packet encoder
+        // and native compression. Capture their OUTPUT, including packets they generate by
+        // writing from their own context, before bypassing only zlib and length encoding.
+        String boundary = pipeline.get(layout.compressionEncoder()) != null
+            ? layout.compressionEncoder() : layout.frameEncoder();
+        pipeline.addAfter(boundary, BYPASS, new NativeCompressionBypass(layout));
         pipeline.addAfter(BYPASS, ENCODE,
             new ZstdFramedCodec.Encoder(level, stats::addTxRaw, stats::addTxWire));
         pipeline.addAfter(ENCODE, FRAME, new PacketFramer());
