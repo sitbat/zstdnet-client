@@ -37,7 +37,8 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
     public void onPreLaunch() {
         try {
             runChecks();
-            System.out.println("ZSTDNET_CLIENT_SMOKE_OK: Knot/Mixin, native Minecraft packet encoder, Zstd, AES, Netty "
+            System.out.println("ZSTDNET_CLIENT_SMOKE_OK: Minecraft " + SharedConstants.getCurrentVersion().name()
+                + ", Java " + Runtime.version().feature() + ", Knot/Mixin, native Minecraft packet encoder, Zstd, AES, Netty "
                 + io.netty.util.Version.identify().get("netty-common"));
             System.exit(0);
         } catch (Throwable error) {
@@ -48,6 +49,9 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
 
     private static void runChecks() throws Exception {
         SharedConstants.tryDetectVersion();
+        require("26.3".equals(SharedConstants.getCurrentVersion().id()),
+            "Smoke test requires Minecraft 26.3, got " + SharedConstants.getCurrentVersion().id());
+        require(Runtime.version().feature() >= 25, "Minecraft 26.3 smoke test requires Java 25 or newer");
         Bootstrap.bootStrap();
         new ZstdNetProxyClient().onInitializeClient();
         var registry = Class.forName("net.fabricmc.fabric.impl.client.rendering.hud.HudElementRegistryImpl");
@@ -109,7 +113,9 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
             Arrays.fill(keyBytes, (byte) 0x31);
             SecretKeySpec key = new SecretKeySpec(keyBytes, "AES");
             connection.setEncryptionKey(cipher(Cipher.DECRYPT_MODE, key), cipher(Cipher.ENCRYPT_MODE, key));
-            require(connection.isEncrypted(), "Minecraft AES handlers were not installed");
+            require(client.pipeline().get("decrypt") instanceof net.minecraft.network.CipherDecoder
+                && client.pipeline().get("encrypt") instanceof net.minecraft.network.CipherEncoder,
+                "Minecraft AES handlers were not installed");
             TransportConnection.Layout layout = new TransportConnection.Layout(
                 "splitter", "encoder", "decompress", "compress", "prepender", 8 * 1024 * 1024);
             TransportStats stats = new TransportStats();

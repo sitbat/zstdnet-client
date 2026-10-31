@@ -178,6 +178,6 @@ public final class ClientReportService {
     }
 
     private static void chat(Component message) {
-        Minecraft.getInstance().gui.getChat().addMessage(message);
+        Minecraft.getInstance().gui.hud.getChat().addClientSystemMessage(message);
     }
 }

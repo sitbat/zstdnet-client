@@ -7,7 +7,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
@@ -39,7 +39,7 @@ public final class ClientHud {
         enabled = config.hud();
         ClientTickEvents.END_CLIENT_TICK.register(ClientHud::tick);
         HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT,
-            Identifier.fromNamespaceAndPath("zstdnet_proxy", "bandwidth"), (graphics, delta) -> render(graphics));
+            Identifier.fromNamespaceAndPath("zstdnet_proxy", "bandwidth"), (graphics, delta) -> extract(graphics));
     }
 
     static boolean isEnabled() {
@@ -97,9 +97,10 @@ public final class ClientHud {
         snapshot = SAMPLER.update(channel, counters, System.nanoTime());
     }
 
-    private static void render(GuiGraphics graphics) {
+    private static void extract(GuiGraphicsExtractor graphics) {
         Minecraft client = Minecraft.getInstance();
-        if (!enabled || !connected || client.options.hideGui || client.getConnection() == null) return;
+        // 26.3 stores F1 visibility on Hud; the CHAT attachment also inherits this condition.
+        if (!enabled || !connected || client.gui.hud.isHidden() || client.getConnection() == null) return;
 
         Component state = Component.translatable(active ? "zstdnet_proxy.hud.active" : "zstdnet_proxy.hud.vanilla");
         List<Component> lines = new ArrayList<>();
@@ -150,7 +151,7 @@ public final class ClientHud {
         graphics.fill(x - 3, y - 3, x - 2, y + height + 2, accent);
         for (int index = 0; index < lines.size(); index++) {
             int color = index == 0 ? accent : index == 1 ? 0xffedf1f7 : 0xffb7c1ce;
-            graphics.drawString(client.font, lines.get(index), x, y + index * rowHeight, color, false);
+            graphics.text(client.font, lines.get(index), x, y + index * rowHeight, color, false);
         }
     }
 

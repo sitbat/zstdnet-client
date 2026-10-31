@@ -1,18 +1,20 @@
 plugins {
-    id 'fabric-loom' version '1.13.1'
+    id 'net.fabricmc.fabric-loom' version '1.17.21'
 }
 
-version = '2.1.1'
+version = '2.2.0'
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+tasks.withType(JavaCompile).configureEach { options.release = 25 }
 
 base {
-    archivesName = 'zstdnet-proxy-client-fabric-1.21.11'
+    archivesName = 'zstdnet-proxy-client-fabric-26.3'
 }
 
 dependencies {
-    minecraft 'com.mojang:minecraft:1.21.11'
-    mappings loom.officialMojangMappings()
-    modImplementation 'net.fabricmc:fabric-loader:0.19.2'
-    modImplementation 'net.fabricmc.fabric-api:fabric-api:0.140.2+1.21.11'
+    minecraft 'com.mojang:minecraft:26.3'
+    implementation 'net.fabricmc:fabric-loader:0.20.1'
+    implementation 'net.fabricmc.fabric-api:fabric-api:0.165.0+26.3'
 
     implementation project(':common')
     include project(':common')
@@ -33,7 +35,7 @@ loom {
 }
 
 // A separate development mod verifies Knot/Mixin and the real Minecraft/Netty pipeline.
-// Its classes/resources are never included by jar/remapJar.
+// Its classes/resources are never included in the production jar.
 sourceSets {
     smoke {
         compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath

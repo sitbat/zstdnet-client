@@ -2,7 +2,7 @@
 
 与 [ZstdNet Velocity 插件](https://github.com/sitbat/zstdnet-velocity) 配套的 Fabric 客户端。客户端与 Velocity 之间先进行 Zstd 压缩，再使用原版 AES 加密；继续使用正版认证和代理的 modern forwarding。
 
-当前分支构建 Minecraft **1.21.11** 客户端 **2.1.1**。
+当前分支构建 Minecraft **26.3** 客户端 **2.2.0**。
 
 | 分支 | Minecraft | 客户端版本 | Java |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@
 
 从 [Releases](https://github.com/sitbat/zstdnet-client/releases) 下载对应 Minecraft 版本的客户端 JAR，放入游戏实例 `mods/`；移除同模组旧版本。模组 ID 为 `zstdnet_proxy`，不能与旧版 `zstdnet` 同装。
 
-Java 21；Fabric Loader 0.19.2、Fabric API 0.140.2+1.21.11。
+Java 25；最低 Fabric Loader 0.19.5、Fabric API 0.161.0+26.3（2.2.1 起）。默认开发依赖为 Loader 0.20.1 / API 0.165.0+26.3。
 
 Velocity 端安装配套仓库的插件，固定目标为 **Velocity 4.3.0 build 44**。后端不安装本客户端。原游戏地址和端口保持不变。代理正版验证及 FabricProxy-Lite 的认证/转发配置见插件仓库。
 
@@ -44,14 +44,21 @@ hud=false
 
 此仓库可独立构建，无需克隆服务端仓库或下载 Velocity。
 
-设置 JDK 21 的 `JAVA_HOME` 和 `JAVA21_HOME`：
+设置 JDK 25 的 `JAVA_HOME`，并用 `JAVA21_HOME` 指向 JDK 21、`JAVA25_HOME` 指向 JDK 25：
 
 ```powershell
-$env:JAVA_HOME = $env:JAVA21_HOME
+$env:JAVA_HOME = $env:JAVA25_HOME
 ./gradlew.bat :common:test :client:test :client:build
 ```
 
-Gradle 8.14 / Loom 1.13.1，交付生产 remapJar。
+Gradle 9.6.0 / Loom 1.17.21，使用 26.3 未混淆构建流程。可选的真实 Via handler 回归：
+
+```powershell
+./tools/download-via-test.ps1
+./gradlew.bat :client:testViaCompatibility
+```
+
+该任务使用校验过的官方测试依赖，生产 JAR 不包含 Via。验证较早的 Fabric 组合时可追加 `'-Pfabric_loader_version=0.19.5' '-Pfabric_api_version=0.161.0+26.3'`。
 
 生产 JAR 位于 `client/build/libs/`，不要安装单独的 smoke 测试 JAR。`common/` 是本仓库内的公共协议/压缩/报告库，不依赖未发布的外部 Maven 包。
 

@@ -12,7 +12,7 @@ import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommands.literal;
 
 public final class ZstdNetProxyClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("zstdnet-proxy-client");
@@ -24,9 +24,9 @@ public final class ZstdNetProxyClient implements ClientModInitializer {
         ClientHud.initialize(config);
         ClientReportService.initialize();
         PayloadTypes.initialize();
-        PayloadTypeRegistry.playS2C().register(TransportPayload.TYPE, TransportPayload.CODEC);
-        PayloadTypeRegistry.playC2S().register(TransportPayload.TYPE, TransportPayload.CODEC);
-        PayloadTypeRegistry.configurationC2S().register(TransportPayload.TYPE, TransportPayload.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(TransportPayload.TYPE, TransportPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(TransportPayload.TYPE, TransportPayload.CODEC);
+        PayloadTypeRegistry.serverboundConfiguration().register(TransportPayload.TYPE, TransportPayload.CODEC);
         // Declares the client capability; ConnectionMixin handles this before game-thread dispatch.
         ClientPlayNetworking.registerGlobalReceiver(TransportPayload.TYPE, (payload, context) -> { });
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> ClientTransport.onJoin(handler.getConnection()));
@@ -52,19 +52,19 @@ public final class ZstdNetProxyClient implements ClientModInitializer {
             }
             dispatcher.register(report);
         });
-        LOGGER.info("ZstdNet Proxy Client loaded (Minecraft 1.21.11; transport v{})", TransportPayload.VERSION);
+        LOGGER.info("ZstdNet Proxy Client loaded (Minecraft 26.3; transport v{})", TransportPayload.VERSION);
     }
 
     private static int showStatus() {
         Minecraft minecraft = Minecraft.getInstance();
         Connection connection = minecraft.getConnection() == null ? null : minecraft.getConnection().getConnection();
-        minecraft.gui.getChat().addMessage(Component.literal(ClientTransport.status(connection)));
+        minecraft.gui.hud.getChat().addClientSystemMessage(Component.literal(ClientTransport.status(connection)));
         return 1;
     }
 
     private static int setHud(boolean enabled) {
         ClientHud.setEnabled(enabled);
-        Minecraft.getInstance().gui.getChat().addMessage(Component.translatable(
+        Minecraft.getInstance().gui.hud.getChat().addClientSystemMessage(Component.translatable(
             enabled ? "zstdnet_proxy.hud.enabled" : "zstdnet_proxy.hud.disabled"));
         return 1;
     }

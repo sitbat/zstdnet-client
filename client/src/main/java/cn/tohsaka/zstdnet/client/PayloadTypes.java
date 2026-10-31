@@ -14,9 +14,9 @@ public final class PayloadTypes {
     private PayloadTypes() { }
 
     static void initialize() {
-        PayloadTypeRegistry.playS2C().register(ProxyHud.TYPE, ProxyHud.CODEC);
-        PayloadTypeRegistry.playC2S().register(ReportRequest.TYPE, ReportRequest.CODEC);
-        PayloadTypeRegistry.playS2C().register(ReportResponse.TYPE, ReportResponse.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(ProxyHud.TYPE, ProxyHud.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(ReportRequest.TYPE, ReportRequest.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(ReportResponse.TYPE, ReportResponse.CODEC);
         ClientPlayNetworking.registerGlobalReceiver(ProxyHud.TYPE, (payload, context) -> {
             var listener = context.client().getConnection();
             if (listener != null) ClientHud.acceptRemote(listener.getConnection(), payload.json());

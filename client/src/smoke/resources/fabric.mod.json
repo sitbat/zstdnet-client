@@ -2,12 +2,15 @@
   "schemaVersion": 1,
   "id": "zstdnet_proxy_smoke",
   "version": "1.0.0",
-  "name": "ZstdNet transport smoke test (development only)",
+  "name": "ZstdNet 26.3 transport smoke test (development only)",
   "environment": "client",
   "entrypoints": {
     "preLaunch": ["cn.tohsaka.zstdnet.client.TransportSmoke"]
   },
   "depends": {
-    "zstdnet_proxy": "*"
+    "zstdnet_proxy": "*",
+    "fabricloader": ">=0.20.1",
+    "minecraft": "26.3",
+    "java": ">=25"
   }
 }
