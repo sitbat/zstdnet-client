@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "zstdnet_proxy_smoke",
+  "version": "1.0.0",
+  "name": "ZstdNet transport smoke test (development only)",
+  "environment": "client",
+  "entrypoints": {
+    "preLaunch": ["cn.tohsaka.zstdnet.client.TransportSmoke"]
+  },
+  "depends": {
+    "zstdnet_proxy": "*"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "zstdnet_proxy",
+  "version": "${version}",
+  "name": "ZstdNet Proxy Client",
+  "description": "Negotiates Zstd compression with the matching Velocity plugin while retaining Minecraft authentication and encryption.",
+  "authors": ["wish", "ZstdNet Proxy contributors"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["cn.tohsaka.zstdnet.client.ZstdNetProxyClient"]
+  },
+  "mixins": ["zstdnet-proxy-client.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.2",
+    "minecraft": "1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "breaks": {
+    "zstdnet": "*"
+  }
+}

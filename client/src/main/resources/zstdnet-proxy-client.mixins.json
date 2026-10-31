@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "cn.tohsaka.zstdnet.client.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "ConnectionAccessor",
+    "ClientCommonPacketListenerAccessor",
+    "ConnectionMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

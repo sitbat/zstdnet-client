@@ -1,0 +1,76 @@
+plugins {
+    id 'fabric-loom' version '1.13.1'
+}
+
+version = '2.1.1'
+
+base {
+    archivesName = 'zstdnet-proxy-client-fabric-1.21.11'
+}
+
+dependencies {
+    minecraft 'com.mojang:minecraft:1.21.11'
+    mappings loom.officialMojangMappings()
+    modImplementation 'net.fabricmc:fabric-loader:0.19.2'
+    modImplementation 'net.fabricmc.fabric-api:fabric-api:0.140.2+1.21.11'
+
+    implementation project(':common')
+    include project(':common')
+    implementation 'com.github.luben:zstd-jni:1.5.7-7'
+    include 'com.github.luben:zstd-jni:1.5.7-7'
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+loom {
+    runs {
+        client {
+            client()
+            runDir 'run'
+        }
+    }
+}
+
+// A separate development mod verifies Knot/Mixin and the real Minecraft/Netty pipeline.
+// Its classes/resources are never included by jar/remapJar.
+sourceSets {
+    smoke {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+tasks.register('smokeJar', Jar) {
+    dependsOn tasks.named('smokeClasses')
+    destinationDirectory = layout.buildDirectory.dir('smoke')
+    archiveClassifier = 'smoke-test'
+    from sourceSets.smoke.output
+}
+
+loom.runs {
+    smoke {
+        client()
+        name 'ZstdNet headless transport smoke test'
+        runDir 'build/smoke-run'
+        vmArg '-Djava.awt.headless=true'
+        vmArg "-Dfabric.addMods=${tasks.named('smokeJar', Jar).get().archiveFile.get().asFile.absolutePath}"
+    }
+}
+
+tasks.named('runSmoke') {
+    dependsOn tasks.named('smokeJar')
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand 'version': project.version
+    }
+}
+
+jar {
+    from(rootProject.file('LICENSE')) {
+        rename { 'LICENSE_zstdnet_proxy' }
+    }
+}
