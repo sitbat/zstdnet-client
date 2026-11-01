@@ -17,7 +17,8 @@ public final class ClientTransport {
     private static final Logger LOGGER = LoggerFactory.getLogger("zstdnet-proxy-client");
     private static final AttributeKey<Phase> PHASE = AttributeKey.valueOf("zstdnet_proxy_client_phase_v2");
     private static final TransportConnection.Layout LAYOUT = new TransportConnection.Layout(
-        "splitter", "encoder", "decompress", "compress", "prepender", 8 * 1024 * 1024);
+        "splitter", "encoder", "decompress", "compress", "prepender", 8 * 1024 * 1024,
+        TransportConnection.ReceivePolicy.TRUSTED_SERVER);
     private static ClientConfig config = new ClientConfig(true, 3, false);
 
     private ClientTransport() {

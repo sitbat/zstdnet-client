@@ -1,9 +1,17 @@
 # 验证范围
 
-本文件为脱敏的验证摘要，不包含原始用户日志、机器路径、主机名或实际服务器地址。
+## 客户端 2.2.2 / Minecraft 26.3
 
-拆分前通过：公共库 22、客户端 27 项测试；另有 5 项实际 ViaFabricPlus 5.1.1 内附 Via handler 回归。旧顺序在 2 项一般转包测试与 5 项 Via 测试中均失败，修复后通过。真实 Via handler 使用受控 UserConnection 夹具，验证处理器顺序和指定包号转换，不冒充完整 Via 协议引擎。Loader 0.20.1 / API 0.165.0+26.3 与 Loader 0.19.5 / API 0.161.0+26.3 的编译及无窗口加载均通过。独立工程已再次通过公共库 22、客户端 27 项测试以及 5 项 Via handler 测试（共 54 项，0 失败/错误/跳过），并在 Loader 0.19.5 / API 0.161.0+26.3 上完成真实 26.3 Fabric/Knot 无窗口加载。生产 JAR（包括嵌套依赖）的每个文件内容均与已交付 2.2.1 版本一致；不以 ZIP 时间戳推断内容差异。
+公共库 28、客户端 27、真实 Via handler 5 项测试全部通过，共 60 项，0 失败、0 错误、0 跳过。测试使用 Java 25、Fabric Loader 0.19.5、Fabric API 0.161.0+26.3。
 
-通用范围：连续 AES 下的 zlib→Zstd 双向切换、碎包/粘包、半帧迁移、限流/流控/读超时、Zstd 历史窗口限制、报告分片/HTML 安全、HUD 速率和重连行为。真实 Fabric/Knot 无窗口检查验证 Mixin/Accessor、HUD 注册、CONFIG HELLO、原生游戏 packet encoder、AES/Zstd 和 F3 计数。
+高速 tick 修复的六项回归包括：单批 20,000 包；40,000 包分四批延迟后合并交付；可信接收真实 136 MiB 原始帧；默认代理 16,384/16,385 包边界；默认代理精确 128 MiB 字节边界；可信方向仍拒绝超大包/帧和异常历史窗口。逐包 accounting 在可信方向仍被调用。
 
-未据此宣称完成 Mac 实机执行、完整模组包、实际 HUD 像素布局、真实正版账号、多后端切服或长时间收益验收。
+旧限流行为通过仅恢复旧预算判定的负控制稳定复现 `Zstd packet budget exceeded`。新策略通过；不依赖测试循环能在一秒内完成。字节预算负控制仅使用测试夹具固定窗口时间，可信 136 MiB 测试不修改时钟。
+
+真实 26.3 Fabric/Knot 无窗口加载通过，使用生产 ClientTransport Layout，实际 Minecraft 拆包、原生压缩处理器、AES 和流控管线接收 40,000 个合成小包，输出 `ZSTDNET_TRUSTED_SERVER_BURST_OK`；合成包用于验证传输，不冒充游戏包内容语义或实际 `/tick` 世界验收。Mixin/Accessor、HUD 注册、CONFIG HELLO、原生编码和 F3 计数检查继续通过。
+
+Via 回归使用官方 ViaFabricPlus 5.1.1 内附处理器与受控 UserConnection 夹具，验证处理顺序和指定包号转换，不冒充完整 Via 协议引擎。其余测试保留持续 AES、zlib→Zstd、碎包/粘包、损坏帧、窗口限制、超时、流控、报告和 HUD/F3 范围。
+
+修复与边界见 [TICK-RATE-FIX.md](TICK-RATE-FIX.md)。未据此宣称完成完整模组组合、实际 HUD 画面、真实正版账号或多后端实机验收；极高持续吞吐仍受游戏处理能力限制。
+
+本仓库不发布原始用户日志、机器路径、主机名或服务器地址。历史版本的验证记录保留于 Git 历史。
