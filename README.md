@@ -2,12 +2,12 @@
 
 与 [ZstdNet Velocity 插件](https://github.com/sitbat/zstdnet-velocity) 配套的 Fabric 客户端。客户端与 Velocity 之间先进行 Zstd 压缩，再使用原版 AES 加密；继续使用正版认证和代理的 modern forwarding。
 
-当前分支构建 Minecraft **1.21.11** 客户端 **2.1.1**。
+当前分支构建 Minecraft **1.21.11** 客户端 **2.1.2**。
 
 | 分支 | Minecraft | 客户端版本 | Java |
 | --- | --- | --- | --- |
-| `main` | 1.21.11 | 2.1.1 | 21 |
-| [`mc/26.3`](https://github.com/sitbat/zstdnet-client/tree/mc/26.3) | 26.3 | 2.2.1 | 25 |
+| `main` | 1.21.11 | 2.1.2 | 21 |
+| [`mc/26.3`](https://github.com/sitbat/zstdnet-client/tree/mc/26.3) | 26.3 | 2.2.2 | 25 |
 
 ## 安装
 
@@ -18,6 +18,8 @@ Java 21；Fabric Loader 0.19.2、Fabric API 0.140.2+1.21.11。
 Velocity 端安装配套仓库的插件，固定目标为 **Velocity 4.3.0 build 44**。后端不安装本客户端。原游戏地址和端口保持不变。代理正版验证及 FabricProxy-Lite 的认证/转发配置见插件仓库。
 
 26.3 客户端若连接其他游戏版本，仍需有效的协议转换器。26.3 的 2.2.1 修复了启用 Zstd 后跳过 ViaFabricPlus 出站转换的问题；具体回归范围见该分支的 VALIDATION.md。
+
+2.1.2 / 2.2.2 修复 `/tick` 高速运行或延迟后集中投递导致的 `Zstd packet budget exceeded` 断连。客户端接收服务器数据时不再套用代理防刷包的每秒包数/字节上限；单包、压缩帧及 Zstd 窗口限制保持有效。代理插件继续使用 2.1.0，无需更换。1.21.11 的 2.1.2 同时包含此前的 Via 出站顺序修复，详见 [TICK-RATE-FIX.md](TICK-RATE-FIX.md)。
 
 ## HUD、统计与报告
 

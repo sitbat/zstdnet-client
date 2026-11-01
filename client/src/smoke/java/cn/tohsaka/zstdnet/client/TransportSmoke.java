@@ -6,6 +6,8 @@ import cn.tohsaka.zstdnet.transport.TransportStats;
 import cn.tohsaka.zstdnet.transport.ZstdFramedCodec;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint;
 import net.minecraft.SharedConstants;
@@ -30,6 +32,7 @@ import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Runs under real Fabric/Knot, then exits before Minecraft initializes a display. */
 public final class TransportSmoke implements PreLaunchEntrypoint {
@@ -37,7 +40,8 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
     public void onPreLaunch() {
         try {
             runChecks();
-            System.out.println("ZSTDNET_CLIENT_SMOKE_OK: Knot/Mixin, native Minecraft packet encoder, Zstd, AES, Netty "
+            System.out.println("ZSTDNET_CLIENT_SMOKE_OK: Minecraft " + SharedConstants.getCurrentVersion().name()
+                + ", Java " + Runtime.version().feature() + ", Knot/Mixin, native Minecraft packet encoder, Zstd, AES, Netty "
                 + io.netty.util.Version.identify().get("netty-common"));
             System.exit(0);
         } catch (Throwable error) {
@@ -48,6 +52,9 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
 
     private static void runChecks() throws Exception {
         SharedConstants.tryDetectVersion();
+        require("1.21.11".equals(SharedConstants.getCurrentVersion().id()),
+            "Smoke test requires Minecraft 1.21.11, got " + SharedConstants.getCurrentVersion().id());
+        require(Runtime.version().feature() >= 21, "Minecraft 1.21.11 smoke test requires Java 21 or newer");
         Bootstrap.bootStrap();
         new ZstdNetProxyClient().onInitializeClient();
         var registry = Class.forName("net.fabricmc.fabric.impl.client.rendering.hud.HudElementRegistryImpl");
@@ -61,7 +68,13 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
         require(cn.tohsaka.zstdnet.client.mixin.ClientCommonPacketListenerAccessor.class.isAssignableFrom(
             Class.forName("net.minecraft.client.multiplayer.ClientConfigurationPacketListenerImpl")),
             "Configuration connection accessor did not apply");
+        var layoutField = ClientTransport.class.getDeclaredField("LAYOUT");
+        layoutField.setAccessible(true);
+        TransportConnection.Layout layout = (TransportConnection.Layout) layoutField.get(null);
+        require(layout.receivePolicy() == TransportConnection.ReceivePolicy.TRUSTED_SERVER,
+            "The actual client transport must explicitly trust server receive throughput");
         verifyConfigurationHello();
+        verifyTrustedServerBurst(layout);
         Connection connection = new Connection(PacketFlow.CLIENTBOUND);
         require(connection instanceof ConnectionAccessor, "ConnectionAccessor Mixin did not apply");
         EmbeddedChannel client = new EmbeddedChannel();
@@ -109,9 +122,9 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
             Arrays.fill(keyBytes, (byte) 0x31);
             SecretKeySpec key = new SecretKeySpec(keyBytes, "AES");
             connection.setEncryptionKey(cipher(Cipher.DECRYPT_MODE, key), cipher(Cipher.ENCRYPT_MODE, key));
-            require(connection.isEncrypted(), "Minecraft AES handlers were not installed");
-            TransportConnection.Layout layout = new TransportConnection.Layout(
-                "splitter", "encoder", "decompress", "compress", "prepender", 8 * 1024 * 1024);
+            require(client.pipeline().get("decrypt") instanceof net.minecraft.network.CipherDecoder
+                && client.pipeline().get("encrypt") instanceof net.minecraft.network.CipherEncoder,
+                "Minecraft AES handlers were not installed");
             TransportStats stats = new TransportStats();
             AtomicBoolean prepared = new AtomicBoolean();
             TransportConnection.prepare(client, layout, stats, () -> prepared.set(true));
@@ -176,6 +189,76 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
         } finally {
             client.finishAndReleaseAll();
             decode.finishAndReleaseAll();
+        }
+    }
+
+    private static void verifyTrustedServerBurst(TransportConnection.Layout layout) throws Exception {
+        byte[] keyBytes = new byte[16];
+        Arrays.fill(keyBytes, (byte) 0x47);
+        SecretKeySpec key = new SecretKeySpec(keyBytes, "AES");
+        TransportStats sent = new TransportStats();
+        TransportStats received = new TransportStats();
+        AtomicInteger packets = new AtomicInteger();
+        Connection connection = new Connection(PacketFlow.CLIENTBOUND);
+        EmbeddedChannel client = new EmbeddedChannel();
+        EmbeddedChannel sender = new EmbeddedChannel(new net.minecraft.network.CipherEncoder(cipher(Cipher.ENCRYPT_MODE, key)),
+            new ZstdFramedCodec.Encoder(3, sent::addTxRaw, sent::addTxWire));
+        sender.freezeTime();
+        ByteBuf delayedWire = Unpooled.buffer();
+        try {
+            Connection.configureSerialization(client.pipeline(), PacketFlow.CLIENTBOUND, false, null);
+            connection.configurePacketHandler(client.pipeline());
+            client.pipeline().fireChannelActive();
+            connection.setupCompression(256, false);
+            connection.setEncryptionKey(cipher(Cipher.DECRYPT_MODE, key), cipher(Cipher.ENCRYPT_MODE, key));
+            // Preserve the actual Minecraft splitter, compression, cipher and flow-control path.
+            // No inbound protocol/listener is installed yet. Replace that native unconfigured
+            // boundary, keeping its actual position after flow control; no world or window is
+            // needed for these deliberately synthetic one-byte Minecraft packet bodies.
+            ChannelHandlerContext inbound = client.pipeline().context(net.minecraft.network.UnconfiguredPipelineHandler.Inbound.class);
+            require(inbound != null, "The native unconfigured inbound boundary was not installed");
+            client.pipeline().replace(inbound.name(), "smoke-packet-collector", new ChannelInboundHandlerAdapter() {
+                @Override public void channelRead(ChannelHandlerContext context, Object message) {
+                    ByteBuf packet = (ByteBuf) message;
+                    try {
+                        require(packet.readableBytes() == 1, "Burst packet framing changed");
+                        require(packet.readUnsignedByte() == (packets.get() & 0xff), "Burst packet order changed");
+                        packets.incrementAndGet();
+                    } finally { packet.release(); }
+                }
+            });
+            AtomicBoolean prepared = new AtomicBoolean();
+            TransportConnection.prepare(client, layout, received, () -> prepared.set(true));
+            client.runPendingTasks();
+            require(prepared.get(), "Trusted server burst decoder was not prepared");
+            for (int batch = 0; batch < 2; batch++) {
+                ByteBuf frames = Unpooled.buffer(40_000, 40_000);
+                for (int index = 0; index < 20_000; index++) {
+                    frames.writeByte(1).writeByte((batch * 20_000 + index) & 0xff);
+                }
+                sender.writeAndFlush(frames);
+                require(sender.readOutbound() == null, "Burst must wait for the batching deadline");
+                sender.advanceTimeBy(3, TimeUnit.MILLISECONDS);
+                sender.runScheduledPendingTasks();
+                sender.checkException();
+                ByteBuf wire = sender.readOutbound();
+                require(wire != null, "Burst encoder emitted no bytes");
+                try { delayedWire.writeBytes(wire); }
+                finally { wire.release(); }
+                require(sender.readOutbound() == null, "Each 20,000-packet burst must fit in a single Zstd batch");
+            }
+            require(packets.get() == 0, "Delayed bursts arrived before their simulated network delivery");
+            client.writeInbound(delayedWire);
+            delayedWire = null;
+            client.checkException();
+            require(packets.get() == 40_000 && client.isActive(), "Trusted high-throughput server traffic disconnected");
+            require(received.rxRaw() == 80_000 && received.rxRaw() == sent.txRaw(), "Burst raw counters changed");
+            require(received.rxWire() == sent.txWire(), "Burst wire counters changed");
+            System.out.println("ZSTDNET_TRUSTED_SERVER_BURST_OK: packets=40000, batches=2");
+        } finally {
+            if (delayedWire != null) delayedWire.release();
+            client.finishAndReleaseAll();
+            sender.finishAndReleaseAll();
         }
     }
 

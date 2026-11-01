@@ -15,6 +15,7 @@ import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 
 import java.lang.reflect.Field;
+import java.util.Objects;
 import java.util.function.IntConsumer;
 
 /**
@@ -35,12 +36,29 @@ public final class TransportConnection {
 
     private TransportConnection() { }
 
+    /** Per-second flood protection is for traffic received by a proxy from a client. */
+    public enum ReceivePolicy {
+        UNTRUSTED_CLIENT,
+        // Fast ticks and delayed network delivery can legitimately burst server traffic.
+        // Frame lengths, packet lengths and the Zstd history window remain bounded.
+        TRUSTED_SERVER
+    }
+
     public record Layout(String frameDecoder, String packetEncoder, String compressionDecoder,
-                         String compressionEncoder, String frameEncoder, int maxInboundPacketBytes) {
+                         String compressionEncoder, String frameEncoder, int maxInboundPacketBytes,
+                         ReceivePolicy receivePolicy) {
         public Layout {
             if (maxInboundPacketBytes <= 0 || maxInboundPacketBytes > 8 * 1024 * 1024) {
                 throw new IllegalArgumentException("invalid inbound packet limit");
             }
+            Objects.requireNonNull(receivePolicy, "receivePolicy");
+        }
+
+        /** Existing proxy callers retain the original flood limits by default. */
+        public Layout(String frameDecoder, String packetEncoder, String compressionDecoder,
+                      String compressionEncoder, String frameEncoder, int maxInboundPacketBytes) {
+            this(frameDecoder, packetEncoder, compressionDecoder, compressionEncoder, frameEncoder,
+                maxInboundPacketBytes, ReceivePolicy.UNTRUSTED_CLIENT);
         }
     }
 
@@ -98,7 +116,12 @@ public final class TransportConnection {
         }
         ChannelPipeline pipeline = channel.pipeline();
         if (outboundTarget(pipeline, layout) == null) throw new IllegalStateException("missing wire encoder");
-        pipeline.addBefore(layout.packetEncoder(), BYPASS, new NativeCompressionBypass(layout));
+        // Raw-packet transformers (for example ViaFabricPlus) run between the packet encoder
+        // and native compression. Capture their OUTPUT, including packets they generate by
+        // writing from their own context, before bypassing only zlib and length encoding.
+        String boundary = pipeline.get(layout.compressionEncoder()) != null
+            ? layout.compressionEncoder() : layout.frameEncoder();
+        pipeline.addAfter(boundary, BYPASS, new NativeCompressionBypass(layout));
         pipeline.addAfter(BYPASS, ENCODE,
             new ZstdFramedCodec.Encoder(level, stats::addTxRaw, stats::addTxWire));
         pipeline.addAfter(ENCODE, FRAME, new PacketFramer());
@@ -200,21 +223,25 @@ public final class TransportConnection {
             }
             ByteBuf frames = batch.data();
             try {
-                // Preserve a bounded decompressed-byte budget even when native zlib is bypassed.
-                long now = System.nanoTime();
-                if (now - windowStarted >= 1_000_000_000L) {
-                    windowStarted = now;
-                    windowBytes = 0;
-                    windowPackets = 0;
+                boolean rateLimited = layout.receivePolicy() == ReceivePolicy.UNTRUSTED_CLIENT;
+                if (rateLimited) {
+                    // Preserve proxy-side flood limits when native zlib is bypassed. Clients
+                    // instead accept valid server bursts, just as the vanilla receive path does.
+                    long now = System.nanoTime();
+                    if (now - windowStarted >= 1_000_000_000L) {
+                        windowStarted = now;
+                        windowBytes = 0;
+                        windowPackets = 0;
+                    }
+                    windowBytes += frames.readableBytes();
+                    if (windowBytes > 128L * 1024 * 1024) throw new DecoderException("Zstd receive budget exceeded");
                 }
-                windowBytes += frames.readableBytes();
-                if (windowBytes > 128L * 1024 * 1024) throw new DecoderException("Zstd receive budget exceeded");
                 while (frames.isReadable()) {
                     int size = readLength(frames);
                     if (size <= 0 || size > layout.maxInboundPacketBytes() || size > frames.readableBytes()) {
                         throw new DecoderException("invalid Zstd packet length: " + size);
                     }
-                    if (++windowPackets > 16384) throw new DecoderException("Zstd packet budget exceeded");
+                    if (rateLimited && ++windowPackets > 16384) throw new DecoderException("Zstd packet budget exceeded");
                     inboundAccount.accept(size);
                     ChannelHandlerContext target = ctx.pipeline().context(layout.frameDecoder());
                     if (target == null) throw new DecoderException("native packet decoder disappeared");

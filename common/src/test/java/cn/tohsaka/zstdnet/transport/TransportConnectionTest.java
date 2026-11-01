@@ -222,6 +222,213 @@ class TransportConnectionTest {
     }
 
     @Test
+    void trustedServerCanSendTwentyThousandPacketsInOneZstdBatch() throws Exception {
+        Peer sender = peer(true);
+        Peer receiver = peer(true);
+        AtomicInteger received = collectTinyPackets(receiver);
+        AtomicInteger accounted = new AtomicInteger();
+        try {
+            prepare(sender);
+            AtomicInteger ready = new AtomicInteger();
+            TransportConnection.prepare(receiver.channel,
+                layoutWithPolicy(LAYOUT, TransportConnection.ReceivePolicy.TRUSTED_SERVER), receiver.stats,
+                ignored -> accounted.incrementAndGet(), ready::incrementAndGet);
+            receiver.channel.runPendingTasks();
+            assertEquals(1, ready.get());
+            TransportConnection.enableOutbound(sender.channel, 3, LAYOUT, sender.stats);
+
+            // All 20,000 two-byte Minecraft frames fit in one 64 KiB Zstd batch. The router
+            // samples System.nanoTime only once for it, so the old 16,384 cap fails reliably
+            // regardless of host speed, without sleeps or pretending Netty freezes that clock.
+            receiver.channel.writeInbound(tinyBatch(sender, 0, 20_000));
+            receiver.channel.checkException();
+            assertEquals(20_000, received.get());
+            assertEquals(20_000, accounted.get(), "trusted traffic must still invoke configured accounting");
+            assertTrue(receiver.channel.isActive());
+            assertEquals(40_000, sender.stats.txRaw());
+            assertEquals(sender.stats.txRaw(), receiver.stats.rxRaw());
+            assertEquals(sender.stats.txWire(), receiver.stats.rxWire());
+            assertEquals(0, sender.nativeResource.encodes);
+            assertEquals(0, receiver.nativeResource.decodes);
+        } finally {
+            sender.channel.finishAndReleaseAll();
+            receiver.channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void defaultUntrustedClientStillRejectsPacketNumberSixteenThousandThreeHundredEightyFive() throws Exception {
+        Peer sender = peer(true);
+        Peer receiver = peer(true);
+        AtomicInteger received = collectTinyPackets(receiver);
+        try {
+            assertEquals(TransportConnection.ReceivePolicy.UNTRUSTED_CLIENT, LAYOUT.receivePolicy(),
+                "the existing six-argument layout must retain proxy receive protection");
+            prepare(sender);
+            prepare(receiver);
+            TransportConnection.enableOutbound(sender.channel, 3, LAYOUT, sender.stats);
+            ByteBuf wire = tinyBatch(sender, 0, 20_000);
+            Exception error = assertThrows(Exception.class, () -> receiver.channel.writeInbound(wire));
+            assertTrue(hasCauseMessage(error, "Zstd packet budget exceeded"));
+            assertEquals(16_384, received.get(), "the first packet over the limit must never be delivered");
+            assertFalse(receiver.channel.isActive());
+            assertEquals(0, wire.refCnt(), "a rejected batch must release the encrypted input");
+        } finally {
+            sender.channel.finishAndReleaseAll();
+            try { receiver.channel.finishAndReleaseAll(); } catch (Exception ignored) { }
+        }
+    }
+
+    @Test
+    void trustedServerReceivesDelayedMultipleBatchesCoalescedIntoOneReadInOrder() throws Exception {
+        Peer sender = peer(true);
+        Peer receiver = separatedClientPeer();
+        AtomicInteger received = collectTinyPackets(receiver);
+        ByteBuf combined = Unpooled.buffer();
+        try {
+            prepare(sender);
+            prepare(receiver, layoutWithPolicy(CLIENT_LAYOUT, TransportConnection.ReceivePolicy.TRUSTED_SERVER));
+            TransportConnection.enableOutbound(sender.channel, 3, LAYOUT, sender.stats);
+            // Build four independently delayed batches, as a delayed network task may accumulate
+            // before finally delivering them together. Each flush advances only Netty's test clock.
+            for (int batch = 0; batch < 4; batch++) {
+                ByteBuf wire = tinyBatch(sender, batch * 10_000, 10_000);
+                try { combined.writeBytes(wire); }
+                finally { wire.release(); }
+            }
+            assertEquals(0, received.get(), "no accumulated network data has been delivered yet");
+            receiver.channel.writeInbound(combined);
+            combined = null;
+            receiver.channel.checkException();
+            assertEquals(40_000, received.get());
+            assertTrue(receiver.channel.isActive());
+            assertEquals(80_000, sender.stats.txRaw());
+            assertEquals(sender.stats.txRaw(), receiver.stats.rxRaw());
+            assertEquals(sender.stats.txWire(), receiver.stats.rxWire());
+            assertEquals(0, receiver.nativeResource.decodes, "large server bursts must not re-enter native zlib");
+            assertEquals(0, receiver.nativeResource.closes);
+        } finally {
+            if (combined != null) combined.release();
+            sender.channel.finishAndReleaseAll();
+            receiver.channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void trustedServerReceivesMoreThanOneHundredTwentyEightMebibytesOfRealLegalData() throws Exception {
+        int rawBatchBytes = 8 * 1024 * 1024;
+        int packetBytes = rawBatchBytes - 4; // The four-byte VarInt makes each raw batch exactly 8 MiB.
+        Peer sender = peer(false);
+        Peer receiver = peer(false);
+        AtomicInteger received = collectLargePackets(receiver, packetBytes);
+        try {
+            prepare(sender);
+            var layout = new TransportConnection.Layout("frame-decoder", "minecraft-encoder", "compression-decoder",
+                "compression-encoder", "frame-encoder", 8 * 1024 * 1024,
+                TransportConnection.ReceivePolicy.TRUSTED_SERVER);
+            prepare(receiver, layout);
+            TransportConnection.enableOutbound(sender.channel, 1, LAYOUT, sender.stats);
+            for (int batch = 0; batch < 17; batch++) {
+                receiver.channel.writeInbound(largeBatch(sender, packetBytes, batch));
+                receiver.channel.checkException();
+                assertEquals(batch + 1, received.get());
+            }
+            assertEquals(17L * rawBatchBytes, receiver.stats.rxRaw());
+            assertTrue(receiver.stats.rxRaw() > 128L * 1024 * 1024);
+            assertEquals(sender.stats.txRaw(), receiver.stats.rxRaw());
+            assertEquals(sender.stats.txWire(), receiver.stats.rxWire());
+            assertTrue(receiver.channel.isActive());
+            assertEquals(0, receiver.nativeResource.decodes);
+        } finally {
+            sender.channel.finishAndReleaseAll();
+            receiver.channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void defaultUntrustedClientStillRejectsDataBeyondOneHundredTwentyEightMebibytes() throws Exception {
+        int rawBatchBytes = 8 * 1024 * 1024;
+        int packetBytes = rawBatchBytes - 4;
+        Peer sender = peer(false);
+        Peer receiver = peer(false);
+        AtomicInteger received = collectLargePackets(receiver, packetBytes);
+        try {
+            prepare(sender);
+            // Retain the six-argument constructor's untrusted policy, with only the packet-size
+            // limit raised so the byte budget is reached without hitting any other bound.
+            var layout = new TransportConnection.Layout("frame-decoder", "minecraft-encoder", "compression-decoder",
+                "compression-encoder", "frame-encoder", 8 * 1024 * 1024);
+            prepare(receiver, layout);
+            Object router = receiver.channel.pipeline().get("zstdnet-proxy-route");
+            var windowStarted = router.getClass().getDeclaredField("windowStarted");
+            windowStarted.setAccessible(true);
+            // Fixture only: hold this existing receive window open even on a slow test host.
+            // Netty's freezeTime does not control System.nanoTime. No production clock is altered.
+            windowStarted.setLong(router, System.nanoTime() + TimeUnit.DAYS.toNanos(1));
+            TransportConnection.enableOutbound(sender.channel, 1, LAYOUT, sender.stats);
+            for (int batch = 0; batch < 16; batch++) {
+                receiver.channel.writeInbound(largeBatch(sender, packetBytes, batch));
+                receiver.channel.checkException();
+            }
+            assertEquals(16, received.get());
+            assertEquals(128L * 1024 * 1024, receiver.stats.rxRaw(), "the exact byte boundary must be accepted");
+            assertTrue(receiver.channel.isActive());
+            ByteBuf excess = tinyBatch(sender, 16, 1);
+            Exception error = assertThrows(Exception.class, () -> receiver.channel.writeInbound(excess));
+            assertTrue(hasCauseMessage(error, "Zstd receive budget exceeded"));
+            assertEquals(16, received.get(), "the first valid packet beyond the byte limit must not be delivered");
+            assertFalse(receiver.channel.isActive());
+            assertEquals(0, excess.refCnt());
+        } finally {
+            sender.channel.finishAndReleaseAll();
+            try { receiver.channel.finishAndReleaseAll(); } catch (Exception ignored) { }
+        }
+    }
+
+    @Test
+    void trustedServerPolicyStillRejectsOversizedFramesPacketsAndNativeWindows() throws Exception {
+        for (int scenario = 0; scenario < 3; scenario++) {
+            Peer sender = peer(false);
+            Peer receiver = peer(false);
+            ByteBuf wire = null;
+            try {
+                TransportConnection.Layout layout = scenario == 0
+                    ? new TransportConnection.Layout("frame-decoder", "minecraft-encoder", "compression-decoder",
+                        "compression-encoder", "frame-encoder", 1024, TransportConnection.ReceivePolicy.TRUSTED_SERVER)
+                    : layoutWithPolicy(LAYOUT, TransportConnection.ReceivePolicy.TRUSTED_SERVER);
+                prepare(sender);
+                prepare(receiver, layout);
+                TransportConnection.enableOutbound(sender.channel, 3, LAYOUT, sender.stats);
+                if (scenario == 1) {
+                    // Exactly one byte above the codec's 8 MiB + VarInt raw frame ceiling.
+                    wire = Unpooled.buffer(13).writeInt(0x80808080)
+                        .writeInt(8 * 1024 * 1024 + 6).writeInt(1).writeByte(0);
+                } else {
+                    sender.channel.writeAndFlush(Unpooled.wrappedBuffer(packet(scenario == 0 ? 2048 : 80, 170)));
+                    flush(sender.channel);
+                    wire = sender.channel.readOutbound();
+                    assertNotNull(wire);
+                    if (scenario == 2) {
+                        assertEquals(0, wire.getUnsignedByte(12 + 4) & 0x20,
+                            "the native window fixture must have a window descriptor");
+                        wire.setByte(12 + 5, 0xa0); // Advertise a forbidden 1 GiB native history window.
+                    }
+                }
+                ByteBuf rejected = wire;
+                wire = null;
+                assertThrows(Exception.class, () -> receiver.channel.writeInbound(rejected),
+                    "trusted policy must preserve structural bound " + scenario);
+                assertNull(receiver.channel.readInbound());
+                if (scenario == 0) assertFalse(receiver.channel.isActive());
+            } finally {
+                if (wire != null) wire.release();
+                sender.channel.finishAndReleaseAll();
+                try { receiver.channel.finishAndReleaseAll(); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    @Test
     void aCommittedZstdStreamRejectsAReversionToVanilla() throws Exception {
         Peer sender = peer(false);
         Peer receiver = peer(false);
@@ -311,6 +518,121 @@ class TransportConnectionTest {
         } finally {
             proxy.channel.finishAndReleaseAll();
             client.channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void protocolTranslationRunsBeforeZstdForNormalRawAndGeneratedWrites() throws Exception {
+        assertProtocolTranslationOrder(true);
+    }
+
+    @Test
+    void protocolTranslationWithoutNativeCompressionStillRunsBeforeZstd() throws Exception {
+        assertProtocolTranslationOrder(false);
+    }
+
+    private static void assertProtocolTranslationOrder(boolean nativeCompression) throws Exception {
+        Peer client = nativeCompression ? separatedClientPeer() : barePeer(true);
+        Peer proxy = nativeCompression ? peer(true) : barePeer(true);
+        TransportConnection.Layout clientLayout = nativeCompression ? CLIENT_LAYOUT : LAYOUT;
+        OutboundProtocolTranslator clientOutbound = new OutboundProtocolTranslator();
+        OutboundProtocolTranslator proxyOutbound = new OutboundProtocolTranslator();
+        InboundProtocolTranslator clientInbound = new InboundProtocolTranslator();
+        InboundProtocolTranslator proxyInbound = new InboundProtocolTranslator();
+        client.channel.pipeline().addBefore(clientLayout.packetEncoder(), "via-encoder", clientOutbound);
+        proxy.channel.pipeline().addBefore(LAYOUT.packetEncoder(), "via-encoder", proxyOutbound);
+        client.channel.pipeline().addBefore(nativeCompression ? "decoder" : "minecraft-decoder",
+            "via-decoder", clientInbound);
+        proxy.channel.pipeline().addBefore("minecraft-decoder", "via-decoder", proxyInbound);
+        try {
+            // Keep the same cipher instances across the vanilla-to-Zstd boundary in both directions.
+            byte[] vanillaUp = packet(281, 130);
+            byte[] vanillaDown = packet(291, 131);
+            client.channel.writeAndFlush(Unpooled.wrappedBuffer(vanillaUp));
+            proxy.channel.writeAndFlush(Unpooled.wrappedBuffer(vanillaDown));
+            transfer(client.channel, proxy.channel, 1);
+            transfer(proxy.channel, client.channel, 2);
+            assertPacket(proxy.channel, vanillaUp);
+            assertPacket(client.channel, vanillaDown);
+            int nativeCalls = nativeCompression ? 1 : 0;
+            assertEquals(nativeCalls, client.nativeResource.encodes);
+            assertEquals(nativeCalls, proxy.nativeResource.encodes);
+            assertEquals(nativeCalls, client.nativeResource.decodes);
+            assertEquals(nativeCalls, proxy.nativeResource.decodes);
+
+            prepare(client, clientLayout);
+            prepare(proxy);
+            TransportConnection.enableOutbound(client.channel, 3, clientLayout, client.stats);
+            TransportConnection.enableOutbound(proxy.channel, 3, LAYOUT, proxy.stats);
+
+            byte[] normalUp = packet(411, 132);
+            byte[] rawUp = packet(421, 133);
+            byte[] generatedUp = packet(431, 134);
+            byte[] normalDown = packet(441, 135);
+            byte[] rawDown = packet(451, 136);
+            byte[] generatedDown = packet(461, 137);
+            clientOutbound.generatedPacket = generatedUp;
+            proxyOutbound.generatedPacket = generatedDown;
+            var normalUpWrite = client.channel.writeAndFlush(Unpooled.wrappedBuffer(normalUp));
+            var normalDownWrite = proxy.channel.writeAndFlush(Unpooled.wrappedBuffer(normalDown));
+            // Via also writes raw encoded packets from the Minecraft encoder context. Such writes
+            // skip that encoder itself, but must still pass translation and the Zstd boundary.
+            var rawUpWrite = client.channel.pipeline().context(clientLayout.packetEncoder())
+                .writeAndFlush(Unpooled.wrappedBuffer(rawUp));
+            var rawDownWrite = proxy.channel.pipeline().context(LAYOUT.packetEncoder())
+                .writeAndFlush(Unpooled.wrappedBuffer(rawDown));
+            flush(client.channel);
+            flush(proxy.channel);
+            transfer(client.channel, proxy.channel, 3);
+            transfer(proxy.channel, client.channel, 5);
+            assertPacket(proxy.channel, normalUp);
+            assertPacket(proxy.channel, generatedUp);
+            assertPacket(proxy.channel, rawUp);
+            assertPacket(client.channel, normalDown);
+            assertPacket(client.channel, generatedDown);
+            assertPacket(client.channel, rawDown);
+            assertTrue(normalUpWrite.isSuccess());
+            assertTrue(normalDownWrite.isSuccess());
+            assertTrue(rawUpWrite.isSuccess());
+            assertTrue(rawDownWrite.isSuccess());
+            assertNotNull(clientOutbound.generatedWrite);
+            assertNotNull(proxyOutbound.generatedWrite);
+            assertTrue(clientOutbound.generatedWrite.isSuccess());
+            assertTrue(proxyOutbound.generatedWrite.isSuccess());
+
+            // A later batch must preserve both protocol translation and continuous AES/Zstd state.
+            byte[] laterUp = packet(70 * 1024, 138);
+            byte[] laterDown = packet(70 * 1024, 139);
+            client.channel.writeAndFlush(Unpooled.wrappedBuffer(laterUp));
+            proxy.channel.pipeline().context(LAYOUT.packetEncoder())
+                .writeAndFlush(Unpooled.wrappedBuffer(laterDown));
+            flush(client.channel);
+            flush(proxy.channel);
+            transfer(client.channel, proxy.channel, 7);
+            transfer(proxy.channel, client.channel, 11);
+            assertPacket(proxy.channel, laterUp);
+            assertPacket(client.channel, laterDown);
+            assertNull(client.channel.readInbound());
+            assertNull(proxy.channel.readInbound());
+            assertEquals(4, clientOutbound.writes, "generated packets must not be translated a second time");
+            assertEquals(4, proxyOutbound.writes, "raw encoder-context writes must still be translated");
+            assertEquals(5, clientInbound.reads, "each vanilla or Zstd packet must reach inbound translation once");
+            assertEquals(5, proxyInbound.reads, "each generated packet must reach inbound translation once");
+            assertEquals(nativeCalls, client.nativeResource.encodes, "active Zstd must not invoke native zlib");
+            assertEquals(nativeCalls, proxy.nativeResource.encodes);
+            assertEquals(nativeCalls, client.nativeResource.decodes);
+            assertEquals(nativeCalls, proxy.nativeResource.decodes);
+            assertEquals(0, client.nativeResource.closes);
+            assertEquals(0, proxy.nativeResource.closes);
+            assertEquals(client.stats.txRaw(), proxy.stats.rxRaw());
+            assertEquals(client.stats.txWire(), proxy.stats.rxWire());
+            assertEquals(proxy.stats.txRaw(), client.stats.rxRaw());
+            assertEquals(proxy.stats.txWire(), client.stats.rxWire());
+            assertTrue(client.stats.txRaw() > laterUp.length);
+            assertTrue(proxy.stats.txRaw() > laterDown.length);
+        } finally {
+            client.channel.finishAndReleaseAll();
+            proxy.channel.finishAndReleaseAll();
         }
     }
 
@@ -451,6 +773,78 @@ class TransportConnectionTest {
         assertEquals(1, ready.get());
     }
 
+    private static TransportConnection.Layout layoutWithPolicy(TransportConnection.Layout layout,
+                                                               TransportConnection.ReceivePolicy policy) {
+        return new TransportConnection.Layout(layout.frameDecoder(), layout.packetEncoder(),
+            layout.compressionDecoder(), layout.compressionEncoder(), layout.frameEncoder(),
+            layout.maxInboundPacketBytes(), policy);
+    }
+
+    private static AtomicInteger collectTinyPackets(Peer peer) {
+        AtomicInteger received = new AtomicInteger();
+        peer.channel.pipeline().addLast("tiny-packet-collector", new ChannelInboundHandlerAdapter() {
+            @Override public void channelRead(ChannelHandlerContext context, Object message) {
+                ByteBuf packet = (ByteBuf) message;
+                try {
+                    assertEquals(1, packet.readableBytes());
+                    assertEquals(received.get() & 0xff, packet.readUnsignedByte(), "packet order changed");
+                    received.incrementAndGet();
+                } finally { packet.release(); }
+            }
+        });
+        return received;
+    }
+
+    private static ByteBuf tinyBatch(Peer sender, int first, int count) {
+        ChannelPromise lastWrite = sender.channel.newPromise();
+        for (int index = 0; index < count; index++) {
+            ByteBuf packet = Unpooled.buffer(1, 1).writeByte((first + index) & 0xff);
+            if (index == count - 1) sender.channel.writeAndFlush(packet, lastWrite);
+            else sender.channel.writeAndFlush(packet);
+        }
+        assertNull(sender.channel.readOutbound(), "the small packets must remain batched until the 2 ms deadline");
+        assertFalse(lastWrite.isDone());
+        flush(sender.channel);
+        assertTrue(lastWrite.isSuccess());
+        ByteBuf wire = sender.channel.readOutbound();
+        assertNotNull(wire);
+        assertNull(sender.channel.readOutbound(), "this burst must fit in exactly one Zstd batch");
+        return wire;
+    }
+
+    private static AtomicInteger collectLargePackets(Peer peer, int expectedBytes) {
+        AtomicInteger received = new AtomicInteger();
+        peer.channel.pipeline().addLast("large-packet-collector", new ChannelInboundHandlerAdapter() {
+            @Override public void channelRead(ChannelHandlerContext context, Object message) {
+                ByteBuf packet = (ByteBuf) message;
+                try {
+                    assertEquals(expectedBytes, packet.readableBytes());
+                    assertEquals(received.get(), packet.getInt(packet.readerIndex()));
+                    assertEquals(0, packet.getUnsignedByte(packet.writerIndex() - 1));
+                    received.incrementAndGet();
+                } finally { packet.release(); }
+            }
+        });
+        return received;
+    }
+
+    private static ByteBuf largeBatch(Peer sender, int packetBytes, int sequence) {
+        ByteBuf packet = Unpooled.buffer(packetBytes, packetBytes).writeZero(packetBytes);
+        packet.setInt(0, sequence);
+        assertTrue(sender.channel.writeAndFlush(packet).isSuccess());
+        ByteBuf wire = sender.channel.readOutbound();
+        assertNotNull(wire, "large packets must flush without waiting for the small-packet timer");
+        assertNull(sender.channel.readOutbound());
+        return wire;
+    }
+
+    private static boolean hasCauseMessage(Throwable error, String expected) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause.getMessage() != null && cause.getMessage().contains(expected)) return true;
+        }
+        return false;
+    }
+
     private static Peer peer(boolean encrypted) throws Exception {
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.freezeTime();
@@ -562,6 +956,51 @@ class TransportConnectionTest {
         int encodes;
         int decodes;
         int closes;
+    }
+
+    /** Adds a target-protocol envelope, representing an ID/field rewrite performed by Via. */
+    private static final class OutboundProtocolTranslator extends ChannelOutboundHandlerAdapter {
+        private int writes;
+        private byte[] generatedPacket;
+        private ChannelPromise generatedWrite;
+
+        @Override public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
+            if (!(message instanceof ByteBuf input)) {
+                context.write(message, promise);
+                return;
+            }
+            writes++;
+            try {
+                context.write(translated(context, input), promise);
+                if (generatedPacket != null) {
+                    // A translator's own target-protocol packet starts at its context, bypassing
+                    // translation on purpose while still needing framing, Zstd, and encryption.
+                    ByteBuf generated = Unpooled.wrappedBuffer(generatedPacket);
+                    generatedPacket = null;
+                    generatedWrite = context.newPromise();
+                    try { context.write(translated(context, generated), generatedWrite); }
+                    finally { generated.release(); }
+                }
+            } finally { input.release(); }
+        }
+
+        private static ByteBuf translated(ChannelHandlerContext context, ByteBuf input) {
+            return context.alloc().buffer(input.readableBytes() + 2)
+                .writeByte(0x63).writeByte(0x26)
+                .writeBytes(input, input.readerIndex(), input.readableBytes());
+        }
+    }
+
+    private static final class InboundProtocolTranslator extends MessageToMessageDecoder<ByteBuf> {
+        private int reads;
+
+        @Override protected void decode(ChannelHandlerContext context, ByteBuf input, List<Object> output) {
+            reads++;
+            assertTrue(input.readableBytes() >= 2, "target-protocol envelope was lost");
+            assertEquals(0x63, input.readUnsignedByte(), "outbound translation was skipped before compression");
+            assertEquals(0x26, input.readUnsignedByte(), "inbound translation must not run before decompression");
+            output.add(input.readRetainedSlice(input.readableBytes()));
+        }
     }
 
     private static final class VarIntFrameDecoder extends ByteToMessageDecoder {
