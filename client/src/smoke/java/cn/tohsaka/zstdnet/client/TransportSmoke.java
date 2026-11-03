@@ -21,8 +21,6 @@ import net.minecraft.network.protocol.handshake.ClientIntent;
 import net.minecraft.network.protocol.handshake.ClientIntentionPacket;
 import net.minecraft.network.protocol.login.LoginProtocols;
 import net.minecraft.network.protocol.login.ServerboundHelloPacket;
-import net.minecraft.network.protocol.login.ServerboundLoginAcknowledgedPacket;
-import net.minecraft.network.protocol.configuration.ConfigurationProtocols;
 import net.minecraft.server.Bootstrap;
 
 import javax.crypto.Cipher;
@@ -73,7 +71,7 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
         TransportConnection.Layout layout = (TransportConnection.Layout) layoutField.get(null);
         require(layout.receivePolicy() == TransportConnection.ReceivePolicy.TRUSTED_SERVER,
             "The actual client transport must explicitly trust server receive throughput");
-        verifyConfigurationHello();
+        ConfigurationDiscoverySmoke.verify();
         verifyTrustedServerBurst(layout);
         Connection connection = new Connection(PacketFlow.CLIENTBOUND);
         require(connection instanceof ConnectionAccessor, "ConnectionAccessor Mixin did not apply");
@@ -260,33 +258,6 @@ public final class TransportSmoke implements PreLaunchEntrypoint {
             client.finishAndReleaseAll();
             sender.finishAndReleaseAll();
         }
-    }
-
-    private static void verifyConfigurationHello() {
-        Connection connection = new Connection(PacketFlow.CLIENTBOUND);
-        EmbeddedChannel channel = new EmbeddedChannel();
-        try {
-            Connection.configureSerialization(channel.pipeline(), PacketFlow.CLIENTBOUND, false, null);
-            connection.configurePacketHandler(channel.pipeline());
-            channel.pipeline().fireChannelActive();
-            connection.send(new ClientIntentionPacket(SharedConstants.getCurrentVersion().protocolVersion(),
-                "smoke.invalid", 25565, ClientIntent.LOGIN));
-            ByteBuf handshake = channel.readOutbound(); require(handshake != null, "No configuration handshake"); handshake.release();
-            connection.setupOutboundProtocol(LoginProtocols.SERVERBOUND);
-            connection.send(ServerboundLoginAcknowledgedPacket.INSTANCE);
-            ByteBuf ack = channel.readOutbound(); require(ack != null, "No login acknowledgement"); ack.release();
-            connection.setupOutboundProtocol(ConfigurationProtocols.SERVERBOUND);
-            connection.setupCompression(256, false);
-            ClientTransport.onJoin(connection);
-            channel.runPendingTasks();
-            ByteBuf hello = channel.readOutbound();
-            require(hello != null, "Configuration HELLO was not encoded");
-            try {
-                String bytes = hello.toString(java.nio.charset.StandardCharsets.ISO_8859_1);
-                require(bytes.contains("zstdnet:proxy_transport"), "HELLO is not a configuration custom payload");
-            } finally { hello.release(); }
-            channel.checkException();
-        } finally { channel.finishAndReleaseAll(); }
     }
 
     private static Cipher cipher(int mode, SecretKeySpec key) throws Exception {
