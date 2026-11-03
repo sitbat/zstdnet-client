@@ -15,3 +15,12 @@ Via 回归使用官方 ViaFabricPlus 5.1.1 内附处理器与受控 UserConnecti
 修复与边界见 [TICK-RATE-FIX.md](TICK-RATE-FIX.md)。未据此宣称完成完整模组组合、实际 HUD 画面、真实正版账号或多后端实机验收；极高持续吞吐仍受游戏处理能力限制。
 
 本仓库不发布原始用户日志、机器路径、主机名或服务器地址。历史版本的验证记录保留于 Git 历史。
+
+
+## 配置发现事件回归
+
+补充真实 Fabric `ClientConfigurationNetworkAddon` 的注册包 → START → 生产 HELLO 事件链。旧检查直接调用 `ClientTransport.onJoin`，只能验证编码，不能证明 START 会在没有后端时触发。本回归确认没有注册/品牌包时不发 HELLO，收到代理 `minecraft:register` 后才发，关闭客户端功能不发，重复注册不重复发。只跳过图形客户端/监听器构造，网络 addon、事件回调、Minecraft 编码器和 AES 均使用真实实现。
+
+可设置 `ZSTDNET_DISCOVERY_FIXTURES` 指向测试目录：先由代理 `PluginMessageProtocolIntegrationTest` 输出 `discovery-<协议号>.bin`，客户端 `runSmoke` 读取该加密探测包并写出 `hello-<协议号>.bin`，再重跑代理同一测试，验证实际客户端加密回包能完成后端准入。该环境变量仅用于测试，不读取玩家日志或账号凭据。
+
+这是验证代码改进，生产客户端源码、版本及已发布 JAR 无需改变。
